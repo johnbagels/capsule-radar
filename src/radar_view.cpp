@@ -132,6 +132,7 @@ static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
+static inline bool mapTheme() { return s_theme == THEME_MAP; }
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
@@ -495,6 +496,20 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_rect_dsc_init(&g);
             g.bg_color = ac.color;
             g.bg_opa = LV_OPA_COVER;
+            // Map theme's background is a real photo/street tile, so a plain glyph can
+            // vanish into it (green over a park, white over a road...). A dark halo behind
+            // it guarantees contrast no matter what's underneath, without touching the
+            // other themes' already-high-contrast black background.
+            if (mapTheme()) {
+                lv_draw_rect_dsc_t halo;
+                lv_draw_rect_dsc_init(&halo);
+                halo.bg_color = lv_color_hex(0x081018);
+                halo.bg_opa = 195;
+                halo.radius = LV_RADIUS_CIRCLE;
+                lv_area_t hr = { (lv_coord_t)(ac.pos.x - 13), (lv_coord_t)(ac.pos.y - 13),
+                                 (lv_coord_t)(ac.pos.x + 13), (lv_coord_t)(ac.pos.y + 13) };
+                lv_draw_rect(d, &halo, &hr);
+            }
             lv_draw_polygon(d, &g, pts, 4);
             if (ac.emergency) {
                 lv_draw_arc_dsc_t h;
@@ -522,18 +537,30 @@ static void ac_draw_cb(lv_event_t *e) {
 
         // floating labels (phosphor only; orb keeps clean balls + the tap card)
         if (!drg) {
+            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
+                             (lv_coord_t)(ac.pos.x + 168), (lv_coord_t)(ac.pos.y + 4) };
+            lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 4), a1.x2, (lv_coord_t)(ac.pos.y + 26) };
+            // Same reasoning as the glyph halo: white/coloured text can disappear into a
+            // light patch of map, so give the callsign+altitude pair a small dark "tag"
+            // behind them in Map theme only.
+            if (mapTheme() && (ac.call[0] || ac.altTxt[0])) {
+                lv_draw_rect_dsc_t tagbg;
+                lv_draw_rect_dsc_init(&tagbg);
+                tagbg.bg_color = lv_color_hex(0x081018);
+                tagbg.bg_opa = 175;
+                tagbg.radius = 5;
+                lv_area_t tag = { (lv_coord_t)(a1.x1 - 4), (lv_coord_t)(a1.y1 - 2), a1.x2, (lv_coord_t)(a2.y2 + 2) };
+                lv_draw_rect(d, &tagbg, &tag);
+            }
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
             lc.font = s_bigText ? &lv_font_montserrat_18 : &lv_font_montserrat_14;
             lc.color = s_cInk;
-            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
-                             (lv_coord_t)(ac.pos.x + 168), (lv_coord_t)(ac.pos.y + 4) };
             if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
             lv_draw_label_dsc_t la;
             lv_draw_label_dsc_init(&la);
             la.font = s_bigText ? &lv_font_montserrat_16 : &lv_font_montserrat_12;
             la.color = ac.color;
-            lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 4), a1.x2, (lv_coord_t)(ac.pos.y + 26) };
             if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
         }
     }
