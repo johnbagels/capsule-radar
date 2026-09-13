@@ -8,6 +8,7 @@
 #include "geo.h"
 #include "coastline.h"
 #include "airports.h"
+#include "basemap.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -70,6 +71,8 @@ static void      (*s_themeCb)(int) = nullptr;
 // scope "chrome" palette (rings/sweep/crosshair/labels) — retinted per theme
 static lv_color_t s_cRing = COL_GREEN, s_cLead = COL_LEAD, s_cInk = COL_INK, s_cSoft = COL_SOFT;
 static lv_obj_t  *s_parent   = nullptr;
+static lv_obj_t  *s_mapCanvas = nullptr;    // THEME_MAP background: real street tiles (basemap.h)
+static bool       s_mapHasData = false;     // guards showing the canvas before it has a buffer
 static lv_obj_t  *s_gridLayer = nullptr;
 static lv_obj_t  *s_sweep     = nullptr;
 static lv_obj_t  *s_acLayer   = nullptr;
@@ -82,6 +85,8 @@ static lv_obj_t  *s_rangeLbl  = nullptr;
 static bool       s_rangeLblVisible = true;
 static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
+static bool       s_geoRefEnabled   = true;   // labeled rings — works on every ring-based theme
+static float       s_curRangeKm     = RANGE_KM_DEFAULT;
 static int        s_maxOnScreen     = 20;          // how many (nearest) aircraft to draw (web-configurable)
 static bool       s_bigText         = false;       // accessibility: bigger glyph labels (set before init)
 static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
@@ -239,6 +244,28 @@ static void grid_draw_cb(lv_event_t *e) {
     lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - 211) }, v2 = { s_cx, (lv_coord_t)(s_cy + 211) };
     lv_draw_line(d, &ll, &h1, &h2);
     lv_draw_line(d, &ll, &v1, &v2);
+
+    // "Geo reference": print the real distance on every ring (not just the outer one),
+    // so the scale reads at a glance — this is what makes "where am I relative to that
+    // plane" answerable without doing mental math against a single range label.
+    if (s_geoRefEnabled && s_curRangeKm > 0) {
+        lv_draw_label_dsc_t rl;
+        lv_draw_label_dsc_init(&rl);
+        rl.font = &lv_font_montserrat_12;
+        rl.color = s_cSoft;
+        rl.opa = 210;
+        const float ang = 135.0f * (float)M_PI / 180.0f;   // SE diagonal: clear of N label + crosshair
+        for (int i = 0; i < 4; ++i) {
+            const float km = s_curRangeKm * ((float)rr[i] / (float)RADAR_R_OUTER_PX);
+            char buf[12];
+            snprintf(buf, sizeof(buf), "%.0f km", (double)km);
+            const lv_coord_t lx = s_cx + (lv_coord_t)lroundf(rr[i] * sinf(ang));
+            const lv_coord_t ly = s_cy - (lv_coord_t)lroundf(rr[i] * cosf(ang));
+            lv_area_t la = { (lv_coord_t)(lx + 2), (lv_coord_t)(ly - 14),
+                             (lv_coord_t)(lx + 56), (lv_coord_t)(ly + 2) };
+            lv_draw_label(d, &rl, &la, buf, NULL);
+        }
+    }
 }
 
 // =============================== sweep =======================================
@@ -554,9 +581,16 @@ void setTheme(int t) {
         case THEME_MILITARY:
             s_cRing = lv_color_hex(0x49C46B); s_cLead = lv_color_hex(0x76E08C);
             s_cInk  = lv_color_hex(0xE0FFE6); s_cSoft = lv_color_hex(0x9FD7A8); break;
+        case THEME_MAP:                         // bright cyan/white reads clearly over street tiles
+            s_cRing = lv_color_hex(0x27C6FF); s_cLead = lv_color_hex(0x6FE0FF);
+            s_cInk  = lv_color_hex(0xFFFFFF); s_cSoft = lv_color_hex(0xCFF3FF); break;
         default:                                // phosphor (orb uses its own colors)
             s_cRing = COL_GREEN; s_cLead = COL_LEAD; s_cInk = COL_INK; s_cSoft = COL_SOFT; break;
     }
+
+    // Map background is only shown once basemap_fetch() has actually delivered tiles
+    // (refreshBasemap() flips s_mapHasData) — otherwise it'd flash a blank/garbage canvas.
+    show(s_mapCanvas, s_theme == THEME_MAP && s_mapHasData);
 
     if (s_parent) {
         if (drg) {
@@ -606,6 +640,24 @@ void setAirportsEnabled(bool on) {
 }
 bool airportsEnabled() { return s_airportsEnabled; }
 
+void setGeoRefEnabled(bool on) {
+    s_geoRefEnabled = on;
+    if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+}
+bool geoRefEnabled() { return s_geoRefEnabled; }
+
+void refreshBasemap() {
+    const uint16_t *pixels = nullptr;
+    double lat = 0, lon = 0; float rk = 0; uint32_t ver = 0;
+    if (!basemap_front(&pixels, &lat, &lon, &rk, &ver) || !pixels || !s_mapCanvas) return;
+    lv_canvas_set_buffer(s_mapCanvas, (void *)pixels, BASEMAP_W, BASEMAP_H, LV_IMG_CF_TRUE_COLOR);
+    s_mapHasData = true;
+    if (s_theme == THEME_MAP) {
+        lv_obj_clear_flag(s_mapCanvas, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(s_mapCanvas);
+    }
+}
+
 // 0 = off, 1 = short, 2 = medium (default), 3 = long. Controls both the per-aircraft
 // trail and the persistent flow layer (the long-lived "where everything has been" tracks).
 void setTrailLength(int level) {
@@ -643,6 +695,15 @@ void init(void *lv_parent) {
     s_flowRedrawCtr = 0;
 
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Backmost layer: THEME_MAP's street-tile background. Created first so everything
+    // else (flow, rings, sweep, aircraft) draws on top of it. Hidden until refreshBasemap()
+    // hands it a real buffer, and again unless the active theme is THEME_MAP.
+    s_mapCanvas = lv_canvas_create(parent);
+    lv_obj_clear_flag(s_mapCanvas, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(s_mapCanvas);
+    lv_obj_add_flag(s_mapCanvas, LV_OBJ_FLAG_HIDDEN);
+    s_mapHasData = false;
 
     if (!s_flowBuf) {
         const size_t sz = LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(SCREEN_W, SCREEN_H);
@@ -713,6 +774,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     out.reserve(aircraft.size());
     std::set<std::string> present;
     const float R = (float)RADAR_R_OUTER_PX;
+    s_curRangeKm = s.rangeKm;                     // geo-ref ring labels read this on next repaint
     ++s_flowGen;                                  // one tick per poll; flow segments age in these units
 
     // Reproject the coastline only when the scope geometry actually changes (home

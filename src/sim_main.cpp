@@ -19,6 +19,7 @@
 #include "weather.h"
 #include "wx_radar.h"
 #include "cloud_image.h"
+#include "basemap.h"
 #include "aircraft.h"
 #include <vector>
 #include <cmath>
@@ -205,6 +206,27 @@ int main(int argc, char **argv) {
             wx[y * WX_RADAR_SIZE + x] = c;
         }
         wx_radar_commit(1784397600UL, HOME_LAT_DEFAULT, HOME_LON_DEFAULT);
+    }
+    // Mock street-map background for THEME_MAP: the native simulator has no network
+    // client (basemap_client.cpp is ESP32-only), so paint a simple procedural street
+    // grid in OSM-ish beige/green — enough to exercise the same compositing path as
+    // real tiles (radar::refreshBasemap() + the canvas layer in radar_view.cpp).
+    basemap_begin();
+    if (uint16_t *bg = basemap_back_buffer()) {
+        const uint16_t landCol  = 0xEF3B;   // pale beige, close to OSM's default land fill
+        const uint16_t roadCol  = 0xFFFF;   // white road fill
+        const uint16_t greenCol = 0xB7E5;   // muted green, mimics parks
+        for (int y = 0; y < BASEMAP_H; ++y) {
+            for (int x = 0; x < BASEMAP_W; ++x) {
+                uint16_t c = landCol;
+                if ((x % 46) < 5 || (y % 46) < 5) c = roadCol;                 // street grid
+                const int gx = x - 340, gy = y - 120;                          // a "park" blob
+                if (gx * gx + gy * gy < 60 * 60) c = greenCol;
+                bg[y * BASEMAP_W + x] = c;
+            }
+        }
+        basemap_commit(HOME_LAT_DEFAULT, HOME_LON_DEFAULT, RANGE_KM_DEFAULT);
+        radar::refreshBasemap();
     }
     // Representative Meteosat-style mock. The native simulator has no network
     // clients, so populate the shared satellite buffer with a dark Earth field

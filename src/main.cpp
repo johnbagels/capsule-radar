@@ -18,6 +18,8 @@
 #include "wx_radar_client.h"
 #include "cloud_image.h"
 #include "cloud_image_client.h"
+#include "basemap.h"
+#include "basemap_client.h"
 #include "radar_view.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
@@ -56,6 +58,7 @@ static bool                  g_fdSleep = true;                       // face-dow
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static bool                  g_geoRef       = true;                  // labeled distance rings on/off (web/NVS)
 static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_minAltFt     = 0;                     // only show aircraft above this altitude, ft (0 = off) (web/NVS)
 static int                   g_maxAltFt     = 0;                     // only show aircraft below this altitude, ft (0 = off) (web/NVS)
@@ -79,6 +82,7 @@ static String                g_tz = TZ_STR;                          // POSIX ti
 static volatile bool         g_weatherDirty = false;
 static volatile bool         g_wxRadarDirty = false;
 static volatile bool         g_cloudImageDirty = false;
+static volatile bool         g_basemapDirty = false;
 
 // Web-selectable time zones (label + POSIX TZ). The <option> value is the index; the save
 // handler maps it back to the POSIX string stored in NVS and used by configTzTime at boot.
@@ -116,6 +120,8 @@ static void adsb_task(void*) {
     uint32_t nextWeatherAt = UINT32_MAX;       // armed five seconds after WiFi connects
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
+    uint32_t nextBasemapAt = UINT32_MAX;
+    double basemapLat = 1e9, basemapLon = 1e9; float basemapRangeKm = -1.0f;  // last successfully fetched
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
@@ -129,6 +135,7 @@ static void adsb_task(void*) {
             nextWeatherAt = millis() + 5000UL; // let the first ADS-B poll complete before weather TLS
             nextCloudImageAt = millis() + 15000UL;
             nextWxRadarAt = millis() + 12000UL;
+            nextBasemapAt = millis() + 20000UL;   // lowest priority: only matters once THEME_MAP is active
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
@@ -233,6 +240,25 @@ static void adsb_task(void*) {
                 } else {
                     nextCloudImageAt = millis() + 60000UL;
                     Serial.println("[clouds] fetch failed; retrying in 60s");
+                }
+            }
+            // Street-map background for THEME_MAP. Unlike weather/clouds this never goes
+            // stale on its own — only fetch when the theme is actually Map AND the home
+            // position or range has changed since the last successful fetch, so a fixed
+            // desk gadget doesn't keep re-downloading the same tiles every few minutes.
+            if (radar::theme() == THEME_MAP && (int32_t)(nowMs - nextBasemapAt) >= 0 &&
+                (fabs(g_settings.homeLat - basemapLat) > 1e-6 ||
+                 fabs(g_settings.homeLon - basemapLon) > 1e-6 ||
+                 fabsf(g_settings.rangeKm - basemapRangeKm) > 0.01f)) {
+                Serial.println("[basemap] fetching street tiles...");
+                if (basemap_fetch(g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm)) {
+                    basemapLat = g_settings.homeLat; basemapLon = g_settings.homeLon;
+                    basemapRangeKm = g_settings.rangeKm;
+                    g_basemapDirty = true;
+                    nextBasemapAt = millis() + 5000UL;    // small cooldown against rapid range taps
+                } else {
+                    nextBasemapAt = millis() + 30000UL;
+                    Serial.println("[basemap] fetch failed; retrying in 30s");
                 }
             }
             // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
@@ -400,9 +426,9 @@ static void handleRoot() {
                  r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
         ropts += o;
     }
-    const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
+    const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military", "Map"};
     String topts;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         char o[80];
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == th ? " selected" : "", tnames[i]);
         topts += o;
@@ -548,6 +574,7 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='fd(this.checked)'>Screen off when placed face-down</label>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
+        "<label><input type=checkbox class=ck %s onchange='gr(this.checked)'>Geo reference (labeled rings)</label>"
         "<label><input type=checkbox class=ck %s onchange='hg(this.checked)'>Hide aircraft on the ground</label>"
         "<label>Minimum altitude</label><select onchange='ma(this.value)'>%s</select>"
         "<label>Maximum altitude</label><select onchange='mb(this.value)'>%s</select>"
@@ -585,6 +612,7 @@ static void handleRoot() {
         "function fd(c){fetch('/fdsleep?v='+(c?1:0)+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
+        "function gr(c){fetch('/georef?v='+(c?1:0)+'&save=1')}"
         "function hg(c){fetch('/ground?v='+(c?1:0)+'&save=1')}"
         "function ma(v){fetch('/altmin?v='+v+'&save=1')}"
         "function mb(v){fetch('/altmax?v='+v+'&save=1')}"
@@ -608,7 +636,7 @@ static void handleRoot() {
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
+        g_showAirports ? "checked" : "", g_geoRef ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
@@ -851,6 +879,20 @@ static void handleAirports() {   // show/hide airport markers (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleGeoRef() {   // labeled distance rings on/off (live) — works on every ring theme
+    if (g_web.hasArg("v")) {
+        g_geoRef = g_web.arg("v").toInt() != 0;
+        radar::setGeoRefEnabled(g_geoRef);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("georef", g_geoRef);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleFdSleep() {   // face-down sleep (screen off when flipped over) on/off
     if (g_web.hasArg("v")) {
         g_fdSleep = g_web.arg("v").toInt() != 0;
@@ -978,6 +1020,7 @@ void setup() {
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
+        g_geoRef = p.getBool("georef", true);
         g_hideGround = p.getBool("hideground", false);
         g_minAltFt = p.getInt("minalt", 0);
         g_maxAltFt = p.getInt("maxalt", 0);
@@ -991,6 +1034,7 @@ void setup() {
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
+        radar::setGeoRefEnabled(g_geoRef);
         g_adsb.setHideGround(g_hideGround);
         g_adsb.setMinAltFt((float)g_minAltFt);
         g_adsb.setMaxAltFt((float)g_maxAltFt);
@@ -1070,6 +1114,7 @@ void setup() {
     g_adsb.begin(g_settings.homeLat, g_settings.homeLon, queryKm);
     wx_radar_begin();
     cloud_image_begin();
+    basemap_begin();
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
 
@@ -1084,6 +1129,7 @@ void setup() {
     g_web.on("/fdsleep", handleFdSleep);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
+    g_web.on("/georef", handleGeoRef);
     g_web.on("/ground", handleGround);
     g_web.on("/altmin", handleAltMin);
     g_web.on("/altmax", handleAltMax);
@@ -1166,6 +1212,10 @@ void loop() {
     if (g_cloudImageDirty) {
         g_cloudImageDirty = false;
         ui_on_data_updated();
+    }
+    if (g_basemapDirty) {
+        g_basemapDirty = false;
+        radar::refreshBasemap();
     }
 
     // periodic: HUD clock + wifi/battery indicators

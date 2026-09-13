@@ -17,7 +17,8 @@ enum RadarTheme {
     THEME_ORB   = 1,   // Orb scope: green gradient, grid, yellow blips
     THEME_AMBER    = 2,   // amber CRT scope (warm monochrome chrome)
     THEME_MILITARY = 3,   // night-vision / military green scope
-    THEME_COUNT    = 4
+    THEME_MAP      = 4,   // real OpenStreetMap street tiles as the scope background
+    THEME_COUNT    = 5
 };
 
 // Flattened, display-ready info for one aircraft (detail card / list view).
@@ -68,6 +69,13 @@ void setSweepEnabled(bool on);                   // show/hide the rotating sweep
 bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();
+// "Geo reference" overlay: prints a distance on every ring (not just the outer one), so the
+// scale reads at a glance regardless of theme. Independent of the Map theme's imagery.
+void setGeoRefEnabled(bool on);
+bool geoRefEnabled();
+// Pull the latest decoded street-map raster (see basemap.h) into the Map theme's background
+// canvas and repaint it. Call after basemap_fetch() completes (main.cpp wires this up).
+void refreshBasemap();
 void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=long (aircraft trails + flow)
 void setMaxOnScreen(int n);                       // how many (nearest) aircraft to draw on the scope
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()
