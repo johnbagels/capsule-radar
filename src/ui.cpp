@@ -225,6 +225,26 @@ static float s_rangeKm = RANGE_KM_DEFAULT;   // current display range (km), for 
 static void (*s_rangeCb)(float) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 
+// The on-device zoom button cycles through this list — settable live so it always matches
+// whichever presets are ticked on the "Ranges to show" config page. Defaults to every
+// master preset (config.h's RANGE_PRESETS_KM) until main.cpp restores the saved selection.
+static float s_rangeSteps[RANGE_PRESETS_N];
+static int   s_rangeStepsN = 0;
+
+static void initDefaultRangeSteps() {
+    if (s_rangeStepsN > 0) return;
+    for (int i = 0; i < RANGE_PRESETS_N; ++i) s_rangeSteps[i] = RANGE_PRESETS_KM[i];
+    s_rangeStepsN = RANGE_PRESETS_N;
+}
+
+void ui_set_range_options(const float *kmValues, int count) {
+    if (count <= 0) return;                               // never accept an empty list
+    if (count > RANGE_PRESETS_N) count = RANGE_PRESETS_N;  // can't exceed the master list
+    for (int i = 0; i < count; ++i) s_rangeSteps[i] = kmValues[i];
+    s_rangeStepsN = count;
+    ui_set_range_km(s_rangeKm);   // re-sync the cycle index in case the current range dropped out
+}
+
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 
 static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cancel on the tileview)
@@ -234,9 +254,9 @@ static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cance
     if (now - last < 250) return;      // debounce repeated/held presses
     last = now;
     if (!s_rangeCb) return;
-    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-    s_rangeIdx = (s_rangeIdx + 1) % n;
-    s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
+    initDefaultRangeSteps();
+    s_rangeIdx = (s_rangeIdx + 1) % s_rangeStepsN;
+    s_rangeCb(s_rangeSteps[s_rangeIdx]);
 }
 
 void ui_set_range_km(float km) {
@@ -246,9 +266,9 @@ void ui_set_range_km(float km) {
         snprintf(b, sizeof(b), LV_SYMBOL_LOOP " %.0f %s", dist_val(km), dist_unit());
         lv_label_set_text(s_zoomLbl, b);
     }
+    initDefaultRangeSteps();
     int best = 0; float bd = 1e9f;                 // sync the cycle index to the shown range
-    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-    for (int i = 0; i < n; ++i) { float d = km - RANGE_STEPS_KM[i]; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
+    for (int i = 0; i < s_rangeStepsN; ++i) { float d = km - s_rangeSteps[i]; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
     s_rangeIdx = best;
 }
 

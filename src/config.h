@@ -17,7 +17,27 @@
 #define ADSB_QUERY_MULT     1.4f
 #define ADSB_QUERY_MIN_KM   12.0f
 #define ADSB_QUERY_MAX_KM   150.0f
-static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
+// Range presets shown in the web config dropdown, the on-device zoom-button cycle, and the
+// "Ranges to show" checkboxes on the config page — one shared list so all three always agree
+// (they used to be two separate hardcoded lists, which is why the on-device cycle and the web
+// dropdown could show different values). A few of these are exact round nautical-mile
+// distances (5/10/25 nm) rather than round km, since aviation-minded users often think in nm;
+// the display label picks up the user's chosen unit automatically either way.
+static const float RANGE_PRESETS_KM[] = {
+    9.26f,    // 5 nm
+    10.0f,
+    15.0f,
+    18.52f,   // 10 nm
+    20.0f,
+    25.0f,
+    30.0f,
+    46.3f,    // 25 nm
+    50.0f,
+    100.0f,
+    150.0f,
+    250.0f,
+};
+static const int RANGE_PRESETS_N = sizeof(RANGE_PRESETS_KM) / sizeof(RANGE_PRESETS_KM[0]);
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos

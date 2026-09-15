@@ -60,6 +60,7 @@ static bool                  g_showSweep = true;                     // rotating
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static bool                  g_geoRef       = true;                  // labeled distance rings on/off (web/NVS)
+static uint16_t              g_rangeMask    = 0xFFFF;                 // which RANGE_PRESETS_KM entries are enabled (web/NVS)
 static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_minAltFt     = 0;                     // only show aircraft above this altitude, ft (0 = off) (web/NVS)
 static int                   g_maxAltFt     = 0;                     // only show aircraft below this altitude, ft (0 = off) (web/NVS)
@@ -301,6 +302,7 @@ static void loadSettings() {
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_fdSleep          = p.getBool("fdsleep", true);
     g_idleFullOff      = p.getBool("idleoff", false);
+    g_rangeMask        = (uint16_t)p.getUInt("rangemask", 0xFFFF);
     g_units            = p.getInt("units", 0);
     g_tz               = p.getString("tz", TZ_STR);
     g_bigText          = p.getBool("bigtext", false);
@@ -372,6 +374,25 @@ static void onRangeChange(float km) {
     ui_on_data_updated();
 }
 
+// Rebuild the enabled-range list from g_rangeMask and push it to the on-device zoom-button
+// cycle. If the currently active range just got un-ticked, snap to the nearest enabled one
+// rather than leaving the display on a range that's no longer selectable.
+static void applyRangeMask() {
+    float filtered[RANGE_PRESETS_N];
+    int n = 0;
+    for (int i = 0; i < RANGE_PRESETS_N; ++i)
+        if ((g_rangeMask >> i) & 1) filtered[n++] = RANGE_PRESETS_KM[i];
+    if (n == 0) { filtered[0] = RANGE_KM_DEFAULT; n = 1; }   // shouldn't happen; the handler blocks an empty mask
+    ui_set_range_options(filtered, n);
+    bool stillEnabled = false;
+    for (int i = 0; i < n; ++i) if (fabsf(filtered[i] - g_settings.rangeKm) < 0.05f) { stillEnabled = true; break; }
+    if (!stillEnabled) {
+        int best = 0; float bd = 1e9f;
+        for (int i = 0; i < n; ++i) { float d = fabsf(filtered[i] - g_settings.rangeKm); if (d < bd) { bd = d; best = i; } }
+        onRangeChange(filtered[best]);
+    }
+}
+
 // Persist the visual theme in NVS (called when the user long-presses to switch).
 static void saveTheme(int t) {
     Preferences p;
@@ -413,17 +434,27 @@ static WebServer g_web(80);
 
 static void handleRoot() {
     const int th = radar::theme();
-    const int ranges[] = {10, 15, 25, 30, 50, 100, 150, 250};
     // The value submitted stays in km (the device works in km); only the label is shown in
     // the user's chosen distance unit so the config page matches the screen.
     const float    ufac  = (g_units == 0) ? 0.539957f : (g_units == 2 ? 0.621371f : 1.0f);
     const char    *uname = (g_units == 0) ? "nm" : (g_units == 2 ? "mi" : "km");
-    String ropts;
-    for (int r : ranges) {
-        char o[72];
-        snprintf(o, sizeof(o), "<option value=%d%s>%.0f %s</option>",
-                 r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
-        ropts += o;
+    String ropts;     // range dropdown — only the ticked presets appear here
+    String rcopts;    // "Ranges to show" checkboxes — every master preset, ticked per g_rangeMask
+    for (int i = 0; i < RANGE_PRESETS_N; ++i) {
+        const float r = RANGE_PRESETS_KM[i];
+        const bool on = (g_rangeMask >> i) & 1;
+        if (on) {
+            char o[72];
+            snprintf(o, sizeof(o), "<option value=%.2f%s>%.0f %s</option>",
+                     r, (fabsf(r - g_settings.rangeKm) < 0.05f) ? " selected" : "", r * ufac, uname);
+            ropts += o;
+        }
+        char c[144];
+        snprintf(c, sizeof(c),
+                 "<label style='display:inline-block;width:auto;margin:4px 10px 0 0'>"
+                 "<input type=checkbox class=ck %s onchange='rc(%d,this.checked)'>%.0f %s</label>",
+                 on ? "checked" : "", i, r * ufac, uname);
+        rcopts += c;
     }
     const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military", "Map"};
     String topts;
@@ -522,10 +553,13 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static const size_t BUFSZ = 10240;
+    static const size_t BUFSZ = 20480;   // was 10240 — a real page render came out to ~10.4 KB and
+                                          // silently truncated (see the length check right after the
+                                          // snprintf call below); PSRAM is plentiful, so keep generous
+                                          // headroom rather than trim content to fit exactly.
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
-    snprintf(buf, BUFSZ,
+    const int wouldBeLen = snprintf(buf, BUFSZ,
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Capsule Radar</title>"
@@ -563,6 +597,8 @@ static void handleRoot() {
         "<label>Center longitude</label><input id=lon name=lon value='%.5f'>"
         "%s"
         "<label>Display range</label><select name=range>%s</select>"
+        "<label>Ranges to show (on-screen zoom button + this dropdown)</label>"
+        "<div>%s</div>"
         "<label>Theme</label><select name=theme>%s</select>"
         "<label>Time zone</label><select name=tz>%s</select>"
         "<button>Save &amp; restart</button></form></div>"
@@ -609,6 +645,7 @@ static void handleRoot() {
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
+        "function rc(i,c){fetch('/rangemask?bit='+i+'&v='+(c?1:0)+'&save=1')}"
         "function fd(c){fetch('/fdsleep?v='+(c?1:0)+'&save=1')}"
         "function io(c){fetch('/idleoff?v='+(c?1:0)+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
@@ -634,13 +671,21 @@ static void handleRoot() {
         "for(i=0;i<e.options.length;i++){if(+e.options[i].dataset.off===o&&+e.options[i].dataset.dst===s){b=i;break;}}"
         "if(b<0)for(i=0;i<e.options.length;i++){if(+e.options[i].dataset.off===o){b=i;break;}}"
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
-        g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
+        g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), rcopts.c_str(), topts.c_str(),
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_idleFullOff ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_geoRef ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
+    // snprintf's return value is the length it WOULD have written; >= BUFSZ means the page
+    // just got silently truncated (this exact bug is what broke the map/toggles before — the
+    // page grew past the old 10 KB buffer and the tail of the single <script> block got cut
+    // off, which fails the whole script's parse, not just the missing bit).
+    if (wouldBeLen >= (int)BUFSZ) {
+        Serial.printf("[web] WARNING: config page truncated! %d bytes needed, BUFSZ is %u — bump BUFSZ in main.cpp\n",
+                      wouldBeLen, (unsigned)BUFSZ);
+    }
     g_web.send(200, "text/html", buf);
 }
 
@@ -920,6 +965,29 @@ static void handleIdleOff() {   // idle: fully off (0) instead of just dimming
     g_web.send(200, "text/plain", "OK");
 }
 
+static void handleRangeMask() {   // tick/untick one range preset (live) — see applyRangeMask()
+    if (g_web.hasArg("bit")) {
+        const int bit = g_web.arg("bit").toInt();
+        if (bit >= 0 && bit < RANGE_PRESETS_N) {
+            const bool on = g_web.hasArg("v") && g_web.arg("v").toInt() != 0;
+            uint16_t newMask = g_rangeMask;
+            if (on) newMask |= (uint16_t)(1u << bit);
+            else    newMask &= (uint16_t)~(1u << bit);
+            if (newMask != 0) {           // never allow every range to be disabled
+                g_rangeMask = newMask;
+                applyRangeMask();
+                if (g_web.hasArg("save")) {
+                    Preferences p;
+                    p.begin("capsuleradar", false);
+                    p.putUInt("rangemask", g_rangeMask);
+                    p.end();
+                }
+            }
+        }
+    }
+    g_web.send(200, "text/plain", "OK");
+}
+
 static void handleGround() {   // hide/show on-ground aircraft (applies from the next feed poll)
     if (g_web.hasArg("v")) {
         g_hideGround = g_web.arg("v").toInt() != 0;
@@ -1072,6 +1140,7 @@ void setup() {
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
     ui_set_units(g_units);                       // apply saved unit preset
+    applyRangeMask();                             // restrict the zoom-button cycle to the saved tick-selection
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
@@ -1142,6 +1211,7 @@ void setup() {
     g_web.on("/idle", handleIdle);
     g_web.on("/fdsleep", handleFdSleep);
     g_web.on("/idleoff", handleIdleOff);
+    g_web.on("/rangemask", handleRangeMask);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
     g_web.on("/georef", handleGeoRef);

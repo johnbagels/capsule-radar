@@ -13,6 +13,9 @@ void ui_set_gps(int state, int sats, float altM);   // GPS indicator: state 0=of
 void ui_splash_show(void);  // branded boot splash (auto-fades, covers init time)
 void ui_set_range_cb(void (*cb)(float km));  // on-screen zoom button -> notify main
 void ui_set_range_km(float km);              // update the zoom button label / sync the cycle
+// Restrict the on-device zoom-button cycle to this subset of config.h's RANGE_PRESETS_KM
+// (in ascending order), so it always matches whichever presets are ticked on the config page.
+void ui_set_range_options(const float *kmValues, int count);
 void ui_set_units(int preset);               // 0 = Aviation (ft,kt,km) · 1 = Metric (m,km/h,km) · 2 = Imperial (ft,mph,mi)
 void ui_set_large_text(bool on);             // accessibility: bigger fonts everywhere. Call BEFORE ui_create()
 void ui_set_weather_forecast(bool forecast); // false = WX radar, true = 3-day forecast
