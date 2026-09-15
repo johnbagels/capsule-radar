@@ -55,6 +55,7 @@ static int                   g_alertMode = 2;                        // 0=off 1=
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_fdSleep = true;                       // face-down sleep (screen off) on/off (web/NVS)
+static bool                  g_idleFullOff = false;                  // idle: fully off (0) instead of just dimming (web/NVS)
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
@@ -121,7 +122,6 @@ static void adsb_task(void*) {
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
     uint32_t nextBasemapAt = UINT32_MAX;
-    double basemapLat = 1e9, basemapLon = 1e9; float basemapRangeKm = -1.0f;  // last successfully fetched
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
@@ -242,18 +242,15 @@ static void adsb_task(void*) {
                     Serial.println("[clouds] fetch failed; retrying in 60s");
                 }
             }
-            // Street-map background for THEME_MAP. Unlike weather/clouds this never goes
-            // stale on its own — only fetch when the theme is actually Map AND the home
-            // position or range has changed since the last successful fetch, so a fixed
-            // desk gadget doesn't keep re-downloading the same tiles every few minutes.
-            if (radar::theme() == THEME_MAP && (int32_t)(nowMs - nextBasemapAt) >= 0 &&
-                (fabs(g_settings.homeLat - basemapLat) > 1e-6 ||
-                 fabs(g_settings.homeLon - basemapLon) > 1e-6 ||
-                 fabsf(g_settings.rangeKm - basemapRangeKm) > 0.01f)) {
+            // Street-map background for THEME_MAP. This is a cache lookup, not a "did
+            // anything change" check: once a given range has been fetched it stays in
+            // basemap.h's LRU cache, so re-visiting it costs nothing here — only a genuine
+            // cache miss (a range/location never fetched before) issues a request.
+            if (radar::theme() == THEME_MAP &&
+                !basemap_lookup(g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm, nullptr, nullptr) &&
+                (int32_t)(nowMs - nextBasemapAt) >= 0) {
                 Serial.println("[basemap] fetching street tiles...");
                 if (basemap_fetch(g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm)) {
-                    basemapLat = g_settings.homeLat; basemapLon = g_settings.homeLon;
-                    basemapRangeKm = g_settings.rangeKm;
                     g_basemapDirty = true;
                     nextBasemapAt = millis() + 5000UL;    // small cooldown against rapid range taps
                 } else {
@@ -303,6 +300,7 @@ static void loadSettings() {
     g_maxAc            = p.getInt("maxac", 20);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_fdSleep          = p.getBool("fdsleep", true);
+    g_idleFullOff      = p.getBool("idleoff", false);
     g_units            = p.getInt("units", 0);
     g_tz               = p.getString("tz", TZ_STR);
     g_bigText          = p.getBool("bigtext", false);
@@ -369,6 +367,7 @@ static void onRangeChange(float km) {
     g_requeryKm = queryRadiusKm();
     g_requery = true;
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
+    radar::refreshBasemap();             // instant if this range's map is already cached; else stays hidden until fetched
     ui_set_range_km(km);
     ui_on_data_updated();
 }
@@ -399,13 +398,13 @@ static void rtc_seed_clock() {
     Serial.println("[rtc] system clock seeded from RTC");
 }
 
-// Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
+// Brightness combines idle auto-dim/off and face-down sleep (sleep wins -> screen off).
 static bool g_asleep = false;   // face-down
 static bool g_idle   = false;   // no touch for a while
 static void applyBrightness() {
     int b = g_brightnessDay;
-    if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;   // idle only dims down
-    if (g_asleep) b = 0;                                         // face-down -> screen off
+    if (g_idle) b = g_idleFullOff ? 0 : min(b, BRIGHTNESS_IDLE);   // idle: dim, or fully off if chosen
+    if (g_asleep) b = 0;                                            // face-down -> screen off
     display::setBrightness(b);
 }
 
@@ -571,6 +570,7 @@ static void handleRoot() {
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
+        "<label><input type=checkbox class=ck %s onchange='io(this.checked)'>Turn screen fully off when idle (instead of dimming)</label>"
         "<label><input type=checkbox class=ck %s onchange='fd(this.checked)'>Screen off when placed face-down</label>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
@@ -610,6 +610,7 @@ static void handleRoot() {
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function fd(c){fetch('/fdsleep?v='+(c?1:0)+'&save=1')}"
+        "function io(c){fetch('/idleoff?v='+(c?1:0)+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
         "function gr(c){fetch('/georef?v='+(c?1:0)+'&save=1')}"
@@ -635,7 +636,7 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
+        g_brightnessDay, iopts.c_str(), g_idleFullOff ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_geoRef ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
@@ -906,6 +907,19 @@ static void handleFdSleep() {   // face-down sleep (screen off when flipped over
     g_web.send(200, "text/plain", "OK");
 }
 
+static void handleIdleOff() {   // idle: fully off (0) instead of just dimming
+    if (g_web.hasArg("v")) {
+        g_idleFullOff = g_web.arg("v").toInt() != 0;
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("idleoff", g_idleFullOff);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "OK");
+}
+
 static void handleGround() {   // hide/show on-ground aircraft (applies from the next feed poll)
     if (g_web.hasArg("v")) {
         g_hideGround = g_web.arg("v").toInt() != 0;
@@ -1127,6 +1141,7 @@ void setup() {
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
     g_web.on("/fdsleep", handleFdSleep);
+    g_web.on("/idleoff", handleIdleOff);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
     g_web.on("/georef", handleGeoRef);

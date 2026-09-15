@@ -82,7 +82,7 @@ static Aircraft mk(const char *call, const char *hex, double distKm, double brgD
     return a;
 }
 
-static void sim_range_cb(float km) { g_set.rangeKm = km; radar::update(g_mockAcs, g_set); ui_set_range_km(km); }
+static void sim_range_cb(float km) { g_set.rangeKm = km; radar::update(g_mockAcs, g_set); radar::refreshBasemap(); ui_set_range_km(km); }
 
 static void mock_init() {
     g_set.homeLat = HOME_LAT_DEFAULT;
@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
     // grid in OSM-ish beige/green — enough to exercise the same compositing path as
     // real tiles (radar::refreshBasemap() + the canvas layer in radar_view.cpp).
     basemap_begin();
-    if (uint16_t *bg = basemap_back_buffer()) {
+    if (uint16_t *bg = basemap_claim_slot(RANGE_KM_DEFAULT)) {
         const uint16_t landCol  = 0xEF3B;   // pale beige, close to OSM's default land fill
         const uint16_t roadCol  = 0xFFFF;   // white road fill
         const uint16_t greenCol = 0xB7E5;   // muted green, mimics parks
@@ -225,7 +225,7 @@ int main(int argc, char **argv) {
                 bg[y * BASEMAP_W + x] = c;
             }
         }
-        basemap_commit(HOME_LAT_DEFAULT, HOME_LON_DEFAULT, RANGE_KM_DEFAULT);
+        basemap_commit_slot(bg, HOME_LAT_DEFAULT, HOME_LON_DEFAULT, RANGE_KM_DEFAULT);
         radar::refreshBasemap();
     }
     // Representative Meteosat-style mock. The native simulator has no network

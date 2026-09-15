@@ -17,6 +17,7 @@ static PNG *s_png = nullptr;
 
 // Set just before decoding each tile; consumed by tile_png_line() to place that tile's
 // pixels at the right spot in the (BASEMAP_W x BASEMAP_H) canvas.
+static uint16_t *s_targetBuf = nullptr;
 static double s_canvasWorldX0 = 0, s_canvasWorldY0 = 0;
 static double s_tileWorldX0 = 0, s_tileWorldY0 = 0;
 static uint32_t s_tilePixelsWritten = 0;
@@ -30,7 +31,7 @@ static bool ensure_decoder(void) {
 }
 
 static int tile_png_line(PNGDRAW *draw) {
-    uint16_t *dst = basemap_back_buffer();
+    uint16_t *dst = s_targetBuf;
     if (!dst) return 1;
     uint16_t line[TILE_PX];
     s_png->getLineAsRGB565(draw, line, PNG_RGB565_LITTLE_ENDIAN, 0x00000000);
@@ -79,7 +80,11 @@ static bool fetch_one_tile(int zoom, long txWrapped, long ty, double tileWorldX0
 }
 
 bool basemap_fetch(double lat, double lon, float rangeKm) {
-    if (WiFi.status() != WL_CONNECTED || !basemap_back_buffer() || !ensure_decoder() || rangeKm <= 0) return false;
+    if (WiFi.status() != WL_CONNECTED || !ensure_decoder() || rangeKm <= 0) return false;
+
+    uint16_t *buf = basemap_claim_slot(rangeKm);   // evicts LRU if the cache is full
+    if (!buf) return false;
+    s_targetBuf = buf;
 
     // Pick a zoom whose meters-per-pixel roughly matches the radar scope's own scale
     // (rangeKm at the outer ring, RADAR_R_OUTER_PX pixels), so the street map lines up
@@ -103,7 +108,7 @@ bool basemap_fetch(double lat, double lon, float rangeKm) {
     s_canvasWorldX0 = worldPx - (double)BASEMAP_W / 2.0;
     s_canvasWorldY0 = worldPy - (double)BASEMAP_H / 2.0;
 
-    memset(basemap_back_buffer(), 0, BASEMAP_W * BASEMAP_H * sizeof(uint16_t));
+    memset(s_targetBuf, 0, BASEMAP_W * BASEMAP_H * sizeof(uint16_t));
 
     // A 3x3 block of 256px tiles is always enough to fully cover the 466x466 canvas
     // no matter where the home position falls within its own tile.
@@ -119,7 +124,7 @@ bool basemap_fetch(double lat, double lon, float rangeKm) {
     }
     Serial.printf("[basemap] zoom=%d tiles=%d/%d for %.5f,%.5f range=%.0fkm\n",
                   zoom, ok, attempted, lat, lon, (double)rangeKm);
-    if (ok == 0) return false;
-    basemap_commit(lat, lon, rangeKm);
+    if (ok == 0) return false;                          // slot stays unclaimed/invalid, reused next time
+    basemap_commit_slot(s_targetBuf, lat, lon, rangeKm);
     return true;
 }

@@ -87,6 +87,7 @@ static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
 static bool       s_geoRefEnabled   = true;   // labeled rings — works on every ring-based theme
 static float       s_curRangeKm     = RANGE_KM_DEFAULT;
+static double       s_curHomeLat    = 0, s_curHomeLon = 0;   // tracked for the basemap cache lookup
 static int        s_maxOnScreen     = 20;          // how many (nearest) aircraft to draw (web-configurable)
 static bool       s_bigText         = false;       // accessibility: bigger glyph labels (set before init)
 static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
@@ -615,8 +616,9 @@ void setTheme(int t) {
             s_cRing = COL_GREEN; s_cLead = COL_LEAD; s_cInk = COL_INK; s_cSoft = COL_SOFT; break;
     }
 
-    // Map background is only shown once basemap_fetch() has actually delivered tiles
-    // (refreshBasemap() flips s_mapHasData) — otherwise it'd flash a blank/garbage canvas.
+    // Re-check the cache on entry: rangeKm may have changed while a different theme was
+    // active, so re-look-up rather than trust whatever s_mapHasData was left showing.
+    if (s_theme == THEME_MAP) refreshBasemap();
     show(s_mapCanvas, s_theme == THEME_MAP && s_mapHasData);
 
     if (s_parent) {
@@ -674,14 +676,24 @@ void setGeoRefEnabled(bool on) {
 bool geoRefEnabled() { return s_geoRefEnabled; }
 
 void refreshBasemap() {
+    if (!s_mapCanvas) return;
+    // Cache lookup only — no network here. Called both after a real fetch completes
+    // (main.cpp's dirty flag) and straight from a range-change tap, so a cache hit
+    // (the common case once you've visited a range before) shows up with zero lag.
     const uint16_t *pixels = nullptr;
-    double lat = 0, lon = 0; float rk = 0; uint32_t ver = 0;
-    if (!basemap_front(&pixels, &lat, &lon, &rk, &ver) || !pixels || !s_mapCanvas) return;
-    lv_canvas_set_buffer(s_mapCanvas, (void *)pixels, BASEMAP_W, BASEMAP_H, LV_IMG_CF_TRUE_COLOR);
-    s_mapHasData = true;
+    uint32_t ver = 0;
+    const bool hit = basemap_lookup(s_curHomeLat, s_curHomeLon, s_curRangeKm, &pixels, &ver);
+    if (hit && pixels) {
+        lv_canvas_set_buffer(s_mapCanvas, (void *)pixels, BASEMAP_W, BASEMAP_H, LV_IMG_CF_TRUE_COLOR);
+        s_mapHasData = true;
+    } else {
+        // Nothing cached for this exact range yet (first visit to it) — hide the map
+        // rather than show a mismatched-scale leftover from a different range.
+        s_mapHasData = false;
+    }
     if (s_theme == THEME_MAP) {
-        lv_obj_clear_flag(s_mapCanvas, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_invalidate(s_mapCanvas);
+        show(s_mapCanvas, s_mapHasData);
+        if (s_mapHasData) lv_obj_invalidate(s_mapCanvas);
     }
 }
 
@@ -801,7 +813,9 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     out.reserve(aircraft.size());
     std::set<std::string> present;
     const float R = (float)RADAR_R_OUTER_PX;
-    s_curRangeKm = s.rangeKm;                     // geo-ref ring labels read this on next repaint
+    s_curRangeKm = s.rangeKm;                     // geo-ref ring labels + basemap cache lookup read these
+    s_curHomeLat = s.homeLat;
+    s_curHomeLon = s.homeLon;
     ++s_flowGen;                                  // one tick per poll; flow segments age in these units
 
     // Reproject the coastline only when the scope geometry actually changes (home
