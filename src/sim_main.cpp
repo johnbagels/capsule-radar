@@ -16,6 +16,7 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "route.h"
+#include "aircraft_info.h"
 #include "weather.h"
 #include "wx_radar.h"
 #include "cloud_image.h"
@@ -289,7 +290,19 @@ int main(int argc, char **argv) {
                                             "Rome", "Lisbon", "Amsterdam", "Dublin" };
             int h = 0;
             for (const char *p = wc; *p; ++p) h += (unsigned char)*p;
-            route_store(wc, cities[h % 8], cities[(h / 2 + 3) % 8]);
+            route_store(wc, cities[h % 8], cities[(h / 2 + 3) % 8], (h % 3) * 3600);   // vary the mock age for preview
+        }
+        // fulfil aircraft-info lookups with a mock too
+        char wh[10];
+        if (aircraft_info_pending(wh, sizeof(wh))) {
+            static const char *models[] = { "Boeing 737-800", "Airbus A320-214", "Embraer E190",
+                                            "Boeing 777-36N", "Airbus A321neo" };
+            static const char *ops[] = { "British Airways", "Ryanair", "easyJet", "Lufthansa", "KLM" };
+            int h = 0;
+            for (const char *p = wh; *p; ++p) h += (unsigned char)*p;
+            char reg[8];
+            snprintf(reg, sizeof(reg), "G-%03X", h & 0xFFF);
+            aircraft_info_store(wh, reg, models[h % 5], ops[(h / 2) % 5], 0);
         }
         lv_timer_handler();
 
@@ -336,7 +349,8 @@ int main(int argc, char **argv) {
             }
             radar::select(0);                            // select an aircraft so the card shows
             ui_on_data_updated();
-            { char wc[12]; if (route_pending(wc, sizeof(wc))) route_store(wc, "Madrid", "London"); }
+            { char wc[12]; if (route_pending(wc, sizeof(wc))) route_store(wc, "Madrid", "London", 0); }
+            { char wh[10]; if (aircraft_info_pending(wh, sizeof(wh))) aircraft_info_store(wh, "G-ABCD", "Airbus A320-214", "easyJet", 0); }
             ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);

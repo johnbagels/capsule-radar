@@ -29,9 +29,10 @@ void route_cache_begin() {
     p.end();
 }
 
-bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
+bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size_t tn, uint32_t *ageSec) {
     if (fn) from[0] = 0;
     if (tn) to[0] = 0;
+    if (ageSec) *ageSec = 0;
     if (!callsign || !callsign[0]) return false;
     char key[12];
     route_key(callsign, key, sizeof(key));
@@ -48,9 +49,14 @@ bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size
     const int b2 = rest.indexOf('|');
     if (b2 < 0) return false;
     const uint32_t now = (uint32_t)time(nullptr);    // expire stale routes (reused callsigns)
-    if (now > 1700000000UL && ts > 1700000000UL && (now - ts) > 86400UL) return false;  // 24 h TTL
+    // Trimmed from 24h to 8h: a callsign-keyed lookup like this reflects the *usual* route for
+    // that flight number (adsbdb, community-maintained), not necessarily today's actual one — a
+    // shorter TTL means a route that's genuinely changed corrects itself sooner. The remaining
+    // staleness (within the 8h window) is surfaced to the UI via ageSec rather than hidden.
+    if (now > 1700000000UL && ts > 1700000000UL && (now - ts) > 8UL * 3600UL) return false;
     snprintf(from, fn, "%s", rest.substring(0, b2).c_str());
     snprintf(to, tn, "%s", rest.substring(b2 + 1).c_str());
+    if (ageSec && now > 1700000000UL && ts > 1700000000UL && now >= ts) *ageSec = now - ts;
     return true;
 }
 

@@ -10,6 +10,8 @@
 #include "snapshot_gate.h"
 #include "route.h"
 #include "route_client.h"
+#include "aircraft_info.h"
+#include "aircraft_info_client.h"
 #include "photo.h"
 #include "photo_client.h"
 #include "weather.h"
@@ -265,16 +267,33 @@ static void adsb_task(void*) {
             char wantCall[12];
             if (route_pending(wantCall, sizeof(wantCall))) {
                 char from[40] = "", to[40] = "";
-                if (route_cache_get(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);                       // NVS hit, no network
-                    Serial.printf("[route] %s (cache): '%s' -> '%s'\n", wantCall, from, to);
+                uint32_t ageSec = 0;
+                if (route_cache_get(wantCall, from, sizeof(from), to, sizeof(to), &ageSec)) {
+                    route_store(wantCall, from, to, ageSec);               // NVS hit, no network
+                    Serial.printf("[route] %s (cache, %us old): '%s' -> '%s'\n", wantCall, (unsigned)ageSec, from, to);
                 } else if (route_fetch(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);
+                    route_store(wantCall, from, to, 0);                    // fresh — no staleness to flag
                     route_cache_put(wantCall, from, to);                  // remember across reboots
                     Serial.printf("[route] %s (net): '%s' -> '%s'\n", wantCall, from, to);
                 } else {
-                    route_store(wantCall, from, to);   // empty -> don't refetch this session
+                    route_store(wantCall, from, to, 0);   // empty -> don't refetch this session
                     Serial.printf("[route] %s: no route\n", wantCall);
+                }
+            }
+            char wantHexAc[10];
+            if (aircraft_info_pending(wantHexAc, sizeof(wantHexAc))) {
+                char reg[16] = "", model[40] = "", op[40] = "";
+                uint32_t ageSec = 0;
+                if (aircraft_info_cache_get(wantHexAc, reg, sizeof(reg), model, sizeof(model), op, sizeof(op), &ageSec)) {
+                    aircraft_info_store(wantHexAc, reg, model, op, ageSec);           // NVS hit, no network
+                    Serial.printf("[acinfo] %s (cache): '%s' '%s' '%s'\n", wantHexAc, reg, model, op);
+                } else if (aircraft_info_fetch(wantHexAc, reg, sizeof(reg), model, sizeof(model), op, sizeof(op))) {
+                    aircraft_info_store(wantHexAc, reg, model, op, 0);
+                    aircraft_info_cache_put(wantHexAc, reg, model, op);              // remember across reboots
+                    Serial.printf("[acinfo] %s (net): '%s' '%s' '%s'\n", wantHexAc, reg, model, op);
+                } else {
+                    aircraft_info_store(wantHexAc, reg, model, op, 0);   // empty -> don't refetch this session
+                    Serial.printf("[acinfo] %s: no info\n", wantHexAc);
                 }
             }
             char wantHex[10];
@@ -1086,6 +1105,7 @@ void setup() {
 
     loadSettings();
     route_cache_begin();   // clear stale route cache if the label format changed
+    aircraft_info_cache_begin();
 
     // --- Display + LVGL (M0) ----------------------------------------------
     // CO5300 AMOLED over QSPI + LVGL draw buffers in PSRAM, then a hello screen.

@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "radar_view.h"
 #include "route.h"
+#include "aircraft_info.h"
 #include "photo.h"
 #include "weather.h"
 #include "wx_radar.h"
@@ -28,6 +29,7 @@ static lv_obj_t *s_card = nullptr, *s_cardTitle = nullptr, *s_cardL = nullptr, *
 static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
 static char s_lastRouteReq[12] = "";
+static char s_lastAcInfoReq[10] = "";
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
 static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
 static lv_obj_t *s_list = nullptr;
@@ -144,6 +146,7 @@ static void refresh_card(void) {
         if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
         s_lastRouteReq[0] = 0;
+        s_lastAcInfoReq[0] = 0;
         return;
     }
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_HIDDEN);
@@ -173,17 +176,54 @@ static void refresh_card(void) {
         snprintf(s_lastRouteReq, sizeof(s_lastRouteReq), "%s", in.call);
         route_request(in.call);
     }
+    // aircraft identity (registration / model / operator), looked up asynchronously by hex —
+    // unlike the route, this essentially never changes, so it's shown as a second line under
+    // the route rather than its own card (keeps the layout change minimal).
+    if (in.hex[0] && strcmp(in.hex, s_lastAcInfoReq) != 0) {
+        snprintf(s_lastAcInfoReq, sizeof(s_lastAcInfoReq), "%s", in.hex);
+        aircraft_info_request(in.hex);
+    }
+    char acReg[16] = "", acModel[40] = "", acOp[40] = "";
+    bool haveAcInfo = false;
+    if (in.hex[0]) {
+        uint32_t acAge = 0;
+        if (aircraft_info_get(in.hex, acReg, sizeof(acReg), acModel, sizeof(acModel), acOp, sizeof(acOp), &acAge))
+            haveAcInfo = (acReg[0] || acModel[0] || acOp[0]);
+    }
     char rfrom[40], rto[40];
     if (!in.call[0]) {
         lv_label_set_text(s_cardRoute, "Route -");                 // no callsign -> nothing to look up
-    } else if (route_get(in.call, rfrom, sizeof(rfrom), rto, sizeof(rto))) {
-        char rt[96];
-        if (rfrom[0] || rto[0]) snprintf(rt, sizeof(rt), "%s -> %s", rfrom[0] ? rfrom : "?", rto[0] ? rto : "?");
-        else                    snprintf(rt, sizeof(rt), "Route unavailable");
-        fold_ascii(rt);
-        lv_label_set_text(s_cardRoute, rt);
     } else {
-        lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
+        uint32_t ageSec = 0;
+        if (route_get(in.call, rfrom, sizeof(rfrom), rto, sizeof(rto), &ageSec)) {
+            char rt[196];
+            int len = 0;
+            if (rfrom[0] || rto[0]) {
+                // A route came from the on-device cache (not a fresh lookup this session) reflects
+                // adsbdb's *usual* route for this callsign, which can be wrong for today's actual
+                // flight — show a small age marker so a surprising route reads as "maybe stale"
+                // rather than as certain. No marker at all means it was just looked up fresh.
+                char age[16] = "";
+                if (ageSec > 0) {
+                    if (ageSec < 3600)      snprintf(age, sizeof(age), "  *cached");
+                    else if (ageSec < 7200) snprintf(age, sizeof(age), "  *cached 1h");
+                    else                    snprintf(age, sizeof(age), "  *cached %uh", (unsigned)(ageSec / 3600));
+                }
+                len = snprintf(rt, sizeof(rt), "%s -> %s%s", rfrom[0] ? rfrom : "?", rto[0] ? rto : "?", age);
+            } else {
+                len = snprintf(rt, sizeof(rt), "Route unavailable");
+            }
+            if (haveAcInfo && len > 0 && (size_t)len < sizeof(rt)) {
+                // "REG  Model (Operator)" — whichever pieces adsbdb actually had for this hex.
+                if (acReg[0])  len += snprintf(rt + len, sizeof(rt) - len, "\n%s", acReg);
+                if (acModel[0]) len += snprintf(rt + len, sizeof(rt) - len, "%s%s", acReg[0] ? "  " : "\n", acModel);
+                if (acOp[0])    len += snprintf(rt + len, sizeof(rt) - len, " (%s)", acOp);
+            }
+            fold_ascii(rt);
+            lv_label_set_text(s_cardRoute, rt);
+        } else {
+            lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
+        }
     }
 
     // aircraft photo (planespotters), shown above the card when one is available

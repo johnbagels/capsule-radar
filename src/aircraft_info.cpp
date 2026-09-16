@@ -1,26 +1,26 @@
-// Shared route state. std::mutex works on both ESP32 (Arduino/FreeRTOS) and the
-// native simulator, so the same code guards the cross-thread access on the device.
-#include "route.h"
+// Shared aircraft-info state. Mirrors route.cpp's mutex-guarded cross-thread handoff.
+#include "aircraft_info.h"
 #include <string.h>
 #include <stdio.h>
 #include <mutex>
 
 static std::mutex s_m;
-static char s_want[12]     = "";   // callsign the UI asked about
-static char s_doneCall[12] = "";   // callsign the stored result belongs to
-static char s_from[40]     = "";
-static char s_to[40]       = "";
-static uint32_t s_ageSec   = 0;    // 0 = fresh fetch this session; else NVS-cache age in seconds
+static char s_want[10]    = "";   // hex the UI asked about
+static char s_doneHex[10] = "";   // hex the stored result belongs to
+static char s_reg[16]     = "";
+static char s_model[40]   = "";
+static char s_operator[40]= "";
+static uint32_t s_ageSec  = 0;
 
-void route_request(const char *callsign) {
+void aircraft_info_request(const char *hex) {
     std::lock_guard<std::mutex> g(s_m);
-    snprintf(s_want, sizeof(s_want), "%s", callsign ? callsign : "");
+    snprintf(s_want, sizeof(s_want), "%s", hex ? hex : "");
 }
 
-bool route_pending(char *callOut, size_t n) {
+bool aircraft_info_pending(char *hexOut, size_t n) {
     std::lock_guard<std::mutex> g(s_m);
-    if (s_want[0] && strcmp(s_want, s_doneCall) != 0) {
-        snprintf(callOut, n, "%s", s_want);
+    if (s_want[0] && strcmp(s_want, s_doneHex) != 0) {
+        snprintf(hexOut, n, "%s", s_want);
         return true;
     }
     return false;
@@ -60,19 +60,23 @@ static void ascii_fold(const char *in, char *out, size_t n) {
     out[o] = 0;
 }
 
-void route_store(const char *callsign, const char *from, const char *to, uint32_t ageSec) {
+void aircraft_info_store(const char *hex, const char *reg, const char *model,
+                         const char *operatorName, uint32_t ageSec) {
     std::lock_guard<std::mutex> g(s_m);
-    snprintf(s_doneCall, sizeof(s_doneCall), "%s", callsign ? callsign : "");
-    ascii_fold(from, s_from, sizeof(s_from));
-    ascii_fold(to,   s_to,   sizeof(s_to));
+    snprintf(s_doneHex, sizeof(s_doneHex), "%s", hex ? hex : "");
+    ascii_fold(reg,          s_reg,      sizeof(s_reg));
+    ascii_fold(model,        s_model,    sizeof(s_model));
+    ascii_fold(operatorName, s_operator, sizeof(s_operator));
     s_ageSec = ageSec;
 }
 
-bool route_get(const char *callsign, char *from, size_t fn, char *to, size_t tn, uint32_t *ageSec) {
+bool aircraft_info_get(const char *hex, char *reg, size_t rn, char *model, size_t mn,
+                       char *operatorName, size_t on, uint32_t *ageSec) {
     std::lock_guard<std::mutex> g(s_m);
-    if (callsign && s_doneCall[0] && strcmp(callsign, s_doneCall) == 0) {
-        snprintf(from, fn, "%s", s_from);
-        snprintf(to, tn, "%s", s_to);
+    if (hex && s_doneHex[0] && strcmp(hex, s_doneHex) == 0) {
+        snprintf(reg, rn, "%s", s_reg);
+        snprintf(model, mn, "%s", s_model);
+        snprintf(operatorName, on, "%s", s_operator);
         if (ageSec) *ageSec = s_ageSec;
         return true;
     }
